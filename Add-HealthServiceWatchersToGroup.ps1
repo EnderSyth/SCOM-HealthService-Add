@@ -1,19 +1,23 @@
 <#
 .SYNOPSIS
-Adds HealthServiceWatcher objects to the UROC group in SCOM 2019.
+Adds HealthServiceWatcher objects to a specified group in SCOM 2019.
 
 .DESCRIPTION
-This script connects to a SCOM 2019 Management Server, finds a group named UROC,
+This script connects to a SCOM 2019 Management Server, finds a group by the provided name,
 identifies all Microsoft.Windows.Computer objects in that group, finds their
 associated HealthServiceWatcher objects, and adds those HealthServiceWatcher
-objects to the UROC group if they aren't already members.
+objects to the specified group if they aren't already members.
 
 .PARAMETER ManagementServer
 The name of the SCOM Management Server to connect to.
 
+.PARAMETER GroupName
+The name of the group to which HealthServiceWatcher objects will be added. Default is "UROC".
 .EXAMPLE
 .\Add-HealthServiceWatchersToGroup.ps1 -ManagementServer "SCOM01.contoso.com"
 
+.EXAMPLE
+.\Add-HealthServiceWatchersToGroup.ps1 -ManagementServer "SCOM01.contoso.com" -GroupName "MyServersGroup"
 .NOTES
 Author: System Administrator
 Date: $(Get-Date -Format "yyyy-MM-dd")
@@ -23,7 +27,10 @@ Version: 1.0
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true)]
-    [string]$ManagementServer
+    [string]$ManagementServer,
+    
+    [Parameter(Mandatory = $true)]
+    [string]$GroupName
 )
 
 # Function to write log messages
@@ -60,31 +67,31 @@ try {
     $connection = New-SCOMManagementGroupConnection -ComputerName $ManagementServer -ErrorAction Stop
     Write-Log "Connected to SCOM Management Server successfully."
     
-    # Step 3: Find the UROC group
-    Write-Log "Finding UROC group..."
-    $urocGroup = Get-SCOMGroup -DisplayName "UROC" -ErrorAction Stop
+    # Step 3: Find the specified group
+    Write-Log "Finding $GroupName group..."
+    $selectedGroup = Get-SCOMGroup -DisplayName $GroupName -ErrorAction Stop
     
-    if (-not $urocGroup) {
-        throw "UROC group not found. Please check the group name and try again."
+    if (-not $selectedGroup) {
+        throw "$GroupName group not found. Please check the group name and try again."
     }
     
-    Write-Log "UROC group found with ID: $($urocGroup.Id)"
-    
-    # Step 4: Get all Microsoft.Windows.Computer objects in the UROC group
-    Write-Log "Getting Microsoft.Windows.Computer objects from the UROC group..."
+    Write-Log "$GroupName group found with ID: $($selectedGroup.Id)"
+
+    # Step 4: Get all Microsoft.Windows.Computer objects in the specified group
+    Write-Log "Getting Microsoft.Windows.Computer objects from the $GroupName group..."
     $computerClass = Get-SCOMClass -Name "Microsoft.Windows.Computer" -ErrorAction Stop
-    $computersInGroup = $urocGroup | Get-SCOMClassInstance -Class $computerClass -ErrorAction Stop
+    $computersInGroup = Get-SCOMClassInstance -Class $computerClass -Group $selectedGroup -ErrorAction Stop
     
     if (-not $computersInGroup -or $computersInGroup.Count -eq 0) {
-        Write-Log "No Microsoft.Windows.Computer objects found in the UROC group." -Level Warning
+        Write-Log "No Microsoft.Windows.Computer objects found in the $GroupName group." -Level Warning
         return
     }
     
-    Write-Log "Found $($computersInGroup.Count) Microsoft.Windows.Computer objects in the UROC group."
-    
-    # Step 5: Get current members of the UROC group to avoid adding duplicates
-    $currentMembers = Get-SCOMGroupInstance -Group $urocGroup -ErrorAction Stop
-    Write-Log "Current UROC group has $($currentMembers.Count) members."
+    Write-Log "Found $($computersInGroup.Count) Microsoft.Windows.Computer objects in the $GroupName group."
+
+    # Step 5: Get current members of the specified group to avoid adding duplicates
+    $currentMembers = Get-SCOMGroupInstance -Group $selectedGroup -ErrorAction Stop
+    Write-Log "Current $GroupName group has $($currentMembers.Count) members."
     
     # Step 6: Find HealthServiceWatcher for each computer and add to the UROC group
     $healthServiceWatcherClass = Get-SCOMClass -Name "Microsoft.SystemCenter.HealthServiceWatcher" -ErrorAction Stop
@@ -113,22 +120,22 @@ try {
                 break
             }
         }
-        
+
         if ($isAlreadyMember) {
-            Write-Log "HealthServiceWatcher for $($computer.DisplayName) is already a member of the UROC group." -Level Info
+            Write-Log "HealthServiceWatcher for $($computer.DisplayName) is already a member of the $GroupName group." -Level Info
             $alreadyMemberCount++
         } else {
             # Add the HealthServiceWatcher to the UROC group
-            Write-Log "Adding HealthServiceWatcher for $($computer.DisplayName) to the UROC group..."
-            Add-SCOMGroupInstance -Group $urocGroup -Instance $healthServiceWatcher -ErrorAction Continue
-            Write-Log "HealthServiceWatcher for $($computer.DisplayName) added to the UROC group successfully."
+            Write-Log "Adding HealthServiceWatcher for $($computer.DisplayName) to the $GroupName group..."
+            Add-SCOMGroupInstance -Group $selectedGroup -Instance $healthServiceWatcher -ErrorAction Continue
+            Write-Log "HealthServiceWatcher for $($computer.DisplayName) added to the $GroupName group successfully."
             $addedCount++
         }
     }
     
     # Step 7: Summary
-    Write-Log "Operation completed. Added $addedCount new HealthServiceWatcher objects to the UROC group."
-    Write-Log "$alreadyMemberCount HealthServiceWatcher objects were already members of the UROC group."
+    Write-Log "Operation completed. Added $addedCount new HealthServiceWatcher objects to the $GroupName group."
+    Write-Log "$alreadyMemberCount HealthServiceWatcher objects were already members of the $GroupName group."
     
 } catch {
     Write-Log "An error occurred: $_" -Level Error
