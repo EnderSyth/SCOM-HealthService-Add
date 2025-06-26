@@ -73,11 +73,14 @@ try {
                                 Write-JobLog "Found SCOM alert: $($Alert.Name)"
                                 
                                 # Compare acknowledged states
-                                $CurrentAckState = $Alert.IsAcknowledged
-                                Write-JobLog "Current acknowledged state: $CurrentAckState, Received state: $AcknowledgedState"
+                                # SCOM uses ResolutionState: 249 = Acknowledged, 0 = New/Unacknowledged
+                                $CurrentResolutionState = $Alert.ResolutionState
+                                $CurrentIsAcknowledged = $CurrentResolutionState -eq 249
                                 
-                                if ($CurrentAckState -ne $AcknowledgedState) {
-                                    Write-JobLog "Acknowledged state mismatch detected for alert $AlertId"
+                                Write-JobLog "Current resolution state: $CurrentResolutionState (Acknowledged: $CurrentIsAcknowledged), Received acknowledged state: $AcknowledgedState"
+                                
+                                if ($CurrentIsAcknowledged -ne $AcknowledgedState) {
+                                    Write-JobLog "Acknowledged state mismatch detected for alert $AlertId - SCOM: $CurrentIsAcknowledged, Webhook: $AcknowledgedState"
                                     # Add your processing logic here for state mismatch
                                 } else {
                                     Write-JobLog "Acknowledged states match for alert $AlertId"
