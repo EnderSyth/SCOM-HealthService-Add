@@ -27,10 +27,16 @@ try {
     # Main listening loop
     while ($HttpListener.IsListening) {
         try {
-            Write-Log "Waiting for incoming webhook request..."
+            # Get the incoming request context with timeout to allow graceful exit
+            $AsyncResult = $HttpListener.BeginGetContext($null, $null)
+            $WaitResult = $AsyncResult.AsyncWaitHandle.WaitOne(5000) # 5 second timeout
             
-            # Get the incoming request context
-            $Context = $HttpListener.GetContext()
+            if (-not $WaitResult) {
+                # Timeout occurred, continue loop to check if we should still be listening
+                continue
+            }
+            
+            $Context = $HttpListener.EndGetContext($AsyncResult)
             $Request = $Context.Request
             $Response = $Context.Response
             
@@ -51,7 +57,6 @@ try {
                     # Start background job to process SCOM alert immediately
                     Write-Log "Processing webhook data - AlertId: $($JsonData.AlertId), Acknowledged: $($JsonData.Acknowledged)"
                     
-                    # Start background job to process SCOM alert
                     $JobScript = {
                         param($AlertId, $AcknowledgedState, $LogFile)
                         
