@@ -13,8 +13,7 @@ function Write-Log {
     Write-Host $LogEntry
 }
 
-# Initialize thread-safe collection for incoming webhook data
-$WebhookQueue = New-Object System.Collections.Concurrent.ConcurrentQueue[PSObject]
+# No collection needed - processing each webhook immediately in background job
 
 # Initialize HTTP Listener
 $HttpListener = New-Object System.Net.HttpListener
@@ -49,13 +48,12 @@ try {
                 try {
                     $JsonData = $RequestBody | ConvertFrom-Json
                     
-                    # Add to queue for background processing
-                    $WebhookQueue.Enqueue($JsonData)
-                    Write-Log "Added webhook data to processing queue - AlarmID: $($JsonData.alarmID), Acknowledged: $($JsonData.Acknowledged)"
+                    # Start background job to process SCOM alert immediately
+                    Write-Log "Processing webhook data - AlertId: $($JsonData.AlertId), Acknowledged: $($JsonData.Acknowledged)"
                     
                     # Start background job to process SCOM alert
                     $JobScript = {
-                        param($AlarmID, $AcknowledgedState, $LogFile)
+                        param($AlertId, $AcknowledgedState, $LogFile)
                         
                         # Function to write log entries from job
                         function Write-JobLog {
@@ -66,10 +64,10 @@ try {
                         }
                         
                         try {
-                            Write-JobLog "Processing alarm ID: $AlarmID with acknowledged state: $AcknowledgedState"
+                            Write-JobLog "Processing alert ID: $AlertId with acknowledged state: $AcknowledgedState"
                             
                             # Get SCOM alert
-                            $Alert = Get-SCOMAlert -Id $AlarmID
+                            $Alert = Get-SCOMAlert -Id $AlertId
                             
                             if ($Alert) {
                                 Write-JobLog "Found SCOM alert: $($Alert.Name)"
@@ -79,22 +77,22 @@ try {
                                 Write-JobLog "Current acknowledged state: $CurrentAckState, Received state: $AcknowledgedState"
                                 
                                 if ($CurrentAckState -ne $AcknowledgedState) {
-                                    Write-JobLog "Acknowledged state mismatch detected for alarm $AlarmID"
+                                    Write-JobLog "Acknowledged state mismatch detected for alert $AlertId"
                                     # Add your processing logic here for state mismatch
                                 } else {
-                                    Write-JobLog "Acknowledged states match for alarm $AlarmID"
+                                    Write-JobLog "Acknowledged states match for alert $AlertId"
                                 }
                             } else {
-                                Write-JobLog "SCOM alert not found for ID: $AlarmID"
+                                Write-JobLog "SCOM alert not found for ID: $AlertId"
                             }
                         }
                         catch {
-                            Write-JobLog "Error processing alarm $AlarmID : $($_.Exception.Message)"
+                            Write-JobLog "Error processing alert $AlertId : $($_.Exception.Message)"
                         }
                     }
                     
                     # Start the background job
-                    Start-Job -ScriptBlock $JobScript -ArgumentList $JsonData.alarmID, $JsonData.Acknowledged, $LogFile | Out-Null
+                    Start-Job -ScriptBlock $JobScript -ArgumentList $JsonData.AlertId, $JsonData.Acknowledged, $LogFile | Out-Null
                     
                     # Send success response
                     $Response.StatusCode = 200
