@@ -28,15 +28,24 @@ try {
     while ($HttpListener.IsListening) {
         try {
             # Get the incoming request context with timeout to allow graceful exit
-            $AsyncResult = $HttpListener.BeginGetContext($null, $null)
-            $WaitResult = $AsyncResult.AsyncWaitHandle.WaitOne(5000) # 5 second timeout
-            
-            if (-not $WaitResult) {
-                # Timeout occurred, continue loop to check if we should still be listening
+            try {
+                $AsyncResult = $HttpListener.BeginGetContext($null, $null)
+                $WaitResult = $AsyncResult.AsyncWaitHandle.WaitOne(5000) # 5 second timeout
+                
+                if (-not $WaitResult) {
+                    # Timeout occurred, continue loop to check if we should still be listening
+                    $AsyncResult.AsyncWaitHandle.Close()
+                    continue
+                }
+                
+                $Context = $HttpListener.EndGetContext($AsyncResult)
+                $AsyncResult.AsyncWaitHandle.Close()
+            }
+            catch {
+                Write-Log "Error in async GetContext: $($_.Exception.Message)"
+                Start-Sleep -Seconds 1
                 continue
             }
-            
-            $Context = $HttpListener.EndGetContext($AsyncResult)
             $Request = $Context.Request
             $Response = $Context.Response
             
