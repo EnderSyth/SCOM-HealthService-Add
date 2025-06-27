@@ -1,0 +1,15 @@
+USE OperationsManager  -- or your operational DB name
+GO
+SELECT 
+  nr.RequestTime,
+  s.DisplayName    AS SubscriptionName,
+  c.DisplayName    AS ChannelName,
+  sub.DisplayName  AS SubscriberName,
+  nr.State         AS DeliveryState,
+  nr.ErrorMessage
+FROM dbo.NotificationRequest nr
+  JOIN dbo.Subscription    s   ON nr.SubscriptionId = s.SubscriptionId
+  JOIN dbo.Channel         c   ON nr.ChannelId      = c.ChannelId
+  JOIN dbo.Subscriber      sub ON nr.SubscriberId   = sub.SubscriberId
+WHERE s.DisplayName = 'MySubName'
+ORDER BY nr.RequestTime DESC;
