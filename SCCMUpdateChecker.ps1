@@ -20,9 +20,7 @@
 #>
 
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$ExcelPath,
-    
+    [string]$ExcelPath = $null,
     [string]$WorksheetName = $null,
     [string]$HostnameColumn = "Hostname",
     [int]$MaxConcurrentJobs = 10,
@@ -31,12 +29,15 @@ param(
 
 # Function to get SCCM updates from remote server
 function Get-SCCMUpdates {
-    param([string]$ComputerName)
+    param(
+        [string]$ComputerName,
+        [System.Management.Automation.PSCredential]$Credential
+    )
     
     try {
         Write-Host "Connecting to $ComputerName..." -ForegroundColor Yellow
         
-        $session = New-PSSession -ComputerName $ComputerName -ErrorAction Stop
+        $session = New-PSSession -ComputerName $ComputerName -Credential $Credential -ErrorAction Stop
         
         $result = Invoke-Command -Session $session -ScriptBlock {
             try {
@@ -143,6 +144,32 @@ try {
     Write-Host "SCCM Update Checker Starting..." -ForegroundColor Green
     Write-Host "=================================" -ForegroundColor Green
     
+    # Prompt for Excel file path if not provided
+    if (-not $ExcelPath) {
+        do {
+            $ExcelPath = Read-Host "Enter the path to your Excel file"
+            if (-not $ExcelPath) {
+                Write-Host "Excel path is required!" -ForegroundColor Red
+            } elseif (-not (Test-Path $ExcelPath)) {
+                Write-Host "File not found: $ExcelPath" -ForegroundColor Red
+                $ExcelPath = $null
+            }
+        } while (-not $ExcelPath)
+    }
+    
+    # Prompt for smart card credentials
+    Write-Host "`nPlease provide your admin smart card credentials:" -ForegroundColor Cyan
+    try {
+        $credential = Get-Credential -Message "Enter your admin smart card credentials"
+        if (-not $credential) {
+            Write-Error "Credentials are required to connect to remote servers."
+            exit 1
+        }
+    } catch {
+        Write-Error "Failed to get credentials: $($_.Exception.Message)"
+        exit 1
+    }
+    
     # Check if ImportExcel module is available
     if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
         Write-Error "ImportExcel module is required. Install it with: Install-Module ImportExcel -Force"
@@ -210,7 +237,7 @@ try {
         }
         
         # Start new job
-        $job = Start-Job -ScriptBlock ${function:Get-SCCMUpdates} -ArgumentList $hostname
+        $job = Start-Job -ScriptBlock ${function:Get-SCCMUpdates} -ArgumentList $hostname, $credential
         $activeJobs += @{
             Job = $job
             Hostname = $hostname
