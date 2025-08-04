@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-#Requires -Modules ImportExcel
+#Requires -Modules PSExcel
 
 <#
 .SYNOPSIS
@@ -170,13 +170,13 @@ try {
         exit 1
     }
     
-    # Check if ImportExcel module is available
-    if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
-        Write-Error "ImportExcel module is required. Install it with: Install-Module ImportExcel -Force"
+    # Check if PSExcel module is available
+    if (-not (Get-Module -ListAvailable -Name PSExcel)) {
+        Write-Error "PSExcel module is required. Install it with: Install-Module PSExcel -Force"
         exit 1
     }
     
-    # Import Excel file
+    # Import Excel file using PSExcel
     Write-Host "Reading Excel file: $ExcelPath" -ForegroundColor Cyan
     
     if (-not (Test-Path $ExcelPath)) {
@@ -184,11 +184,17 @@ try {
         exit 1
     }
     
-    # Import the Excel data
-    $excelData = if ($WorksheetName) {
-        Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName
-    } else {
-        Import-Excel -Path $ExcelPath
+    # Import the Excel data using PSExcel
+    try {
+        if ($WorksheetName) {
+            $excelData = Import-XLSX -Path $ExcelPath -WorksheetName $WorksheetName
+        } else {
+            $excelData = Import-XLSX -Path $ExcelPath
+        }
+    } catch {
+        Write-Error "Failed to read Excel file: $($_.Exception.Message)"
+        Write-Host "Tip: Ensure Excel file is not open in another application" -ForegroundColor Yellow
+        exit 1
     }
     
     # Extract hostnames
