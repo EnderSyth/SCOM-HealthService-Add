@@ -119,8 +119,7 @@ function Install-SCCMUpdatesRemotely {
                         # Get the CCM_SoftwareUpdatesManager class
                         $updateManager = [wmiclass]"root\ccm\clientsdk:CCM_SoftwareUpdatesManager"
                         
-                        # Prepare update list for installation - need to get fresh WMI objects for installation
-                        # Cannot use the filtered objects directly due to PSObject wrapping in remote sessions
+                        # Prepare update list for installation - unwrap PSObjects to get native WMI objects
                         Write-Host "Preparing updates for installation..." -ForegroundColor Cyan
                         
                         $updateIDs = @()
@@ -129,18 +128,53 @@ function Install-SCCMUpdatesRemotely {
                             $updateIDs += $update.UpdateID
                         }
                         
-                        # Get fresh WMI objects for installation using the UpdateIDs
-                        $installableUpdates = @()
-                        foreach ($updateID in $updateIDs) {
-                            $wmiUpdate = Get-WmiObject -Namespace "root\ccm\clientsdk" -Class "ccm_softwareupdate" -Filter "UpdateID='$updateID'"
-                            if ($wmiUpdate) {
-                                $installableUpdates += $wmiUpdate
+                        # Alternative approach: Use WMI method invocation directly
+                        Write-Host "Using direct WMI method invocation..." -ForegroundColor Cyan
+                        
+                        try {
+                            # Get the update manager instance
+                            $updateManagerPath = "root\ccm\clientsdk:CCM_SoftwareUpdatesManager"
+                            
+                            # Build the method parameters manually
+                            $methodParams = @()
+                            foreach ($updateID in $updateIDs) {
+                                $methodParams += $updateID
+                            }
+                            
+                            Write-Host "Invoking InstallUpdates via WMI with $($methodParams.Count) UpdateIDs..." -ForegroundColor Cyan
+                            
+                            # Use Invoke-WmiMethod instead of direct method call
+                            $installResult = Invoke-WmiMethod -Namespace "root\ccm\clientsdk" -Class "CCM_SoftwareUpdatesManager" -Name "InstallUpdates" -ArgumentList @(,$methodParams)
+                            
+                        } catch {
+                            Write-Host "Direct WMI method failed, trying alternative approach..." -ForegroundColor Yellow
+                            
+                            # Fallback: Try using the CCM_SoftwareUpdatesManager with individual update installation
+                            $installResult = @{ ReturnValue = -1 }
+                            $successCount = 0
+                            
+                            foreach ($updateID in $updateIDs) {
+                                try {
+                                    $singleUpdate = @($updateID)
+                                    $singleResult = Invoke-WmiMethod -Namespace "root\ccm\clientsdk" -Class "CCM_SoftwareUpdatesManager" -Name "InstallUpdates" -ArgumentList @(,$singleUpdate)
+                                    if ($singleResult.ReturnValue -eq 0) {
+                                        $successCount++
+                                        Write-Host "  Successfully queued update: $updateID" -ForegroundColor Green
+                                    } else {
+                                        Write-Host "  Failed to queue update: $updateID (Code: $($singleResult.ReturnValue))" -ForegroundColor Red
+                                    }
+                                } catch {
+                                    Write-Host "  Error queuing update: $updateID - $($_.Exception.Message)" -ForegroundColor Red
+                                }
+                            }
+                            
+                            # Set overall result based on success count
+                            $installResult = @{
+                                ReturnValue = if ($successCount -eq $updateIDs.Count) { 0 } else { 1 }
+                                SuccessfulUpdates = $successCount
+                                TotalUpdates = $updateIDs.Count
                             }
                         }
-                        
-                        # Call the InstallUpdates method with fresh WMI objects
-                        Write-Host "Calling SCCM InstallUpdates method with $($installableUpdates.Count) updates..." -ForegroundColor Cyan
-                        $installResult = $updateManager.InstallUpdates($installableUpdates)
                         
                         # Interpret the result
                         switch ($installResult.ReturnValue) {
