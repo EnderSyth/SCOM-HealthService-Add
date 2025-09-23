@@ -120,15 +120,14 @@ function Install-SCCMUpdatesRemotely {
                         $updateManager = [wmiclass]"root\ccm\clientsdk:CCM_SoftwareUpdatesManager"
                         
                         # Prepare update list for installation (using UpdateID)
+                        # SCCM expects an array of CCM_SoftwareUpdate objects, not hashtables
                         $updateList = @()
                         foreach ($update in $pendingUpdates) {
-                            $updateList += @{
-                                "UpdateID" = $update.UpdateID
-                            }
                             Write-Host "  Queuing: $($update.Name)" -ForegroundColor Gray
+                            $updateList += $update
                         }
                         
-                        # Call the InstallUpdates method
+                        # Call the InstallUpdates method with the actual update objects
                         Write-Host "Calling SCCM InstallUpdates method..." -ForegroundColor Cyan
                         $installResult = $updateManager.InstallUpdates($updateList)
                         
