@@ -29,10 +29,152 @@ param(
     [string]$ComputerName,
     
     [switch]$Force,
-    [int]$TimeoutMinutes = 5
+    [switch]$VerifyInstallation,
+    [int]$TimeoutMinutes = 5,
+    [int]$VerificationWaitMinutes = 5
 )
 
-# Function to get and install SCCM updates on remote server
+# Function to verify installation progress
+function Verify-InstallationProgress {
+    param(
+        [string]$ComputerName,
+        [System.Management.Automation.PSCredential]$Credential,
+        [array]$OriginalUpdateIDs,
+        [int]$WaitMinutes = 5
+    )
+    
+    Write-Host "`nVerifying installation progress..." -ForegroundColor Cyan
+    Write-Host "Waiting $WaitMinutes minutes for SCCM to process the evaluation cycle..." -ForegroundColor Yellow
+    
+    # Wait for SCCM to process
+    Start-Sleep -Seconds ($WaitMinutes * 60)
+    
+    try {
+        $session = New-PSSession -ComputerName $ComputerName -Credential $Credential -ErrorAction Stop
+        
+        $verificationResult = Invoke-Command -Session $session -ScriptBlock {
+            param($OriginalIDs)
+            
+            try {
+                # Check scan time
+                $scanHistory = Get-WmiObject -Namespace "root\ccm\scanagent" -Class "CCM_ScanUpdateSourceHistory" -ErrorAction SilentlyContinue | 
+                              Sort-Object LastScanTime -Descending | Select-Object -First 1
+                
+                # Get current update status
+                $currentUpdates = Get-WmiObject -Namespace "root\ccm\clientsdk" -Class "ccm_softwareupdate" -ErrorAction Stop
+                
+                # Check status of our original updates
+                $originalUpdateStatus = @()
+                foreach ($updateID in $OriginalIDs) {
+                    $update = $currentUpdates | Where-Object { $_.UpdateID -eq $updateID }
+                    if ($update) {
+                        $status = switch ($update.EvaluationState) {
+                            0 { "Available" }
+                            1 { "Pending" }  
+                            2 { "Downloading" }
+                            3 { "Downloaded" }
+                            6 { "Installing" }
+                            7 { "Pending Reboot" }
+                            8 { "Pending Reboot" }
+                            11 { "Failed" }
+                            12 { "Failed" }
+                            13 { "Installed" }
+                            default { "Unknown ($($update.EvaluationState))" }
+                        }
+                        
+                        $originalUpdateStatus += @{
+                            Name = $update.Name
+                            UpdateID = $updateID
+                            Status = $status
+                            EvaluationState = $update.EvaluationState
+                        }
+                    } else {
+                        $originalUpdateStatus += @{
+                            Name = "Update not found"
+                            UpdateID = $updateID
+                            Status = "Not Found"
+                            EvaluationState = -1
+                        }
+                    }
+                }
+                
+                # Count current states
+                $statusCounts = @{
+                    Pending = ($currentUpdates | Where-Object { $_.EvaluationState -eq 0 -or $_.EvaluationState -eq 1 }).Count
+                    Downloading = ($currentUpdates | Where-Object { $_.EvaluationState -eq 2 -or $_.EvaluationState -eq 3 }).Count
+                    Installing = ($currentUpdates | Where-Object { $_.EvaluationState -eq 6 -or $_.EvaluationState -eq 7 }).Count
+                    Installed = ($currentUpdates | Where-Object { $_.EvaluationState -eq 13 }).Count
+                    Failed = ($currentUpdates | Where-Object { $_.EvaluationState -eq 11 -or $_.EvaluationState -eq 12 }).Count
+                }
+                
+                return @{
+                    Success = $true
+                    LastScanTime = if ($scanHistory) { $scanHistory.LastScanTime } else { "Unknown" }
+                    OriginalUpdateStatus = $originalUpdateStatus
+                    CurrentStatusCounts = $statusCounts
+                    TotalUpdates = $currentUpdates.Count
+                }
+                
+            } catch {
+                return @{
+                    Success = $false
+                    Error = $_.Exception.Message
+                }
+            }
+        } -ArgumentList @(,$OriginalUpdateIDs)
+        
+        Remove-PSSession $session
+        
+        if ($verificationResult.Success) {
+            Write-Host "`n" + "="*50 -ForegroundColor Green
+            Write-Host "INSTALLATION VERIFICATION RESULTS" -ForegroundColor Green  
+            Write-Host "="*50 -ForegroundColor Green
+            
+            Write-Host "Last SCCM Scan Time: $($verificationResult.LastScanTime)" -ForegroundColor White
+            Write-Host "`nCurrent Update Status Counts:" -ForegroundColor Yellow
+            Write-Host "  Pending: $($verificationResult.CurrentStatusCounts.Pending)" -ForegroundColor Yellow
+            Write-Host "  Downloading: $($verificationResult.CurrentStatusCounts.Downloading)" -ForegroundColor Cyan
+            Write-Host "  Installing: $($verificationResult.CurrentStatusCounts.Installing)" -ForegroundColor Magenta
+            Write-Host "  Installed: $($verificationResult.CurrentStatusCounts.Installed)" -ForegroundColor Green
+            Write-Host "  Failed: $($verificationResult.CurrentStatusCounts.Failed)" -ForegroundColor Red
+            
+            Write-Host "`nStatus of Originally Pending Updates:" -ForegroundColor Yellow
+            Write-Host "-" * 40 -ForegroundColor Yellow
+            
+            $progressMade = $false
+            foreach ($update in $verificationResult.OriginalUpdateStatus) {
+                $color = switch ($update.Status) {
+                    "Downloading" { "Cyan"; $progressMade = $true }
+                    "Installing" { "Magenta"; $progressMade = $true }
+                    "Installed" { "Green"; $progressMade = $true }
+                    "Pending Reboot" { "Yellow"; $progressMade = $true }
+                    "Failed" { "Red" }
+                    default { "White" }
+                }
+                
+                Write-Host "• $($update.Name)" -ForegroundColor White
+                Write-Host "  Status: $($update.Status)" -ForegroundColor $color
+                Write-Host ""
+            }
+            
+            if ($progressMade) {
+                Write-Host "✓ Installation progress detected! SCCM is processing the updates." -ForegroundColor Green
+            } else {
+                Write-Host "⚠ No immediate progress detected. This could mean:" -ForegroundColor Yellow
+                Write-Host "  - Updates are queued but not yet started" -ForegroundColor Gray
+                Write-Host "  - SCCM is still evaluating policies" -ForegroundColor Gray
+                Write-Host "  - Updates require user interaction or scheduling" -ForegroundColor Gray
+                Write-Host "  - Check again in 10-15 minutes" -ForegroundColor Gray
+            }
+            
+        } else {
+            Write-Host "Verification failed: $($verificationResult.Error)" -ForegroundColor Red
+        }
+        
+    } catch {
+        Write-Host "Failed to verify installation: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
 function Install-SCCMUpdatesRemotely {
     param(
         [string]$ComputerName,
@@ -128,100 +270,142 @@ function Install-SCCMUpdatesRemotely {
                             $updateIDs += $update.UpdateID
                         }
                         
-                        # Use the correct SCCM Client SDK approach
-                        Write-Host "Using SCCM Client SDK method..." -ForegroundColor Cyan
+                        # For manual SCCM configurations, use client action approach
+                        Write-Host "Using SCCM Client Action methods for manual configuration..." -ForegroundColor Cyan
                         
                         try {
-                            # Method 1: Use the CCM_SoftwareUpdatesManager.InstallUpdates static method
-                            # This method expects an array of UpdateIDs in a specific format
-                            
-                            # Create the parameter array in the format SCCM expects
-                            $updateIDsParam = @()
-                            foreach ($updateID in $updateIDs) {
-                                # Each update needs to be in a hashtable with specific structure
-                                $updateIDsParam += @{
-                                    "UpdateID" = $updateID
-                                }
-                            }
-                            
-                            Write-Host "Calling InstallUpdates with $($updateIDsParam.Count) updates using Invoke-CimMethod..." -ForegroundColor Cyan
-                            
-                            # Try using CIM instead of WMI (more modern approach)
-                            try {
-                                $installResult = Invoke-CimMethod -Namespace "root\ccm\clientsdk" -ClassName "CCM_SoftwareUpdatesManager" -MethodName "InstallUpdates" -Arguments @{ CCMUpdates = $updateIDsParam }
-                            } catch {
-                                Write-Host "CIM method failed, trying WMI approach..." -ForegroundColor Yellow
-                                
-                                # Fallback to WMI with proper parameter structure
-                                $wmiClass = [wmiclass]"root\ccm\clientsdk:CCM_SoftwareUpdatesManager"
-                                $inParams = $wmiClass.GetMethodParameters("InstallUpdates")
-                                
-                                # Create the update objects array
-                                $updateObjects = @()
-                                foreach ($updateID in $updateIDs) {
-                                    # Get the actual update object for proper installation
-                                    $updateObj = Get-WmiObject -Namespace "root\ccm\clientsdk" -Class "ccm_softwareupdate" -Filter "UpdateID='$updateID'"
-                                    if ($updateObj) {
-                                        $updateObjects += $updateObj
-                                    }
-                                }
-                                
-                                Write-Host "Found $($updateObjects.Count) update objects, calling InstallUpdates..." -ForegroundColor Cyan
-                                
-                                # Set the parameter with the actual update objects
-                                $inParams.CCMUpdates = $updateObjects
-                                $installResult = $wmiClass.InvokeMethod("InstallUpdates", $inParams, $null)
-                            }
-                            
-                        } catch {
-                            Write-Host "SDK method failed, trying simplified approach..." -ForegroundColor Yellow
-                            
-                            # Last resort: Try to trigger installation through evaluation state change
                             $installResult = @{ ReturnValue = -1 }
                             $successCount = 0
+                            $actionResults = @()
                             
                             foreach ($updateID in $updateIDs) {
                                 try {
-                                    # Get the specific update
+                                    # Get the specific update object
                                     $updateObj = Get-WmiObject -Namespace "root\ccm\clientsdk" -Class "ccm_softwareupdate" -Filter "UpdateID='$updateID'"
                                     
                                     if ($updateObj) {
-                                        # Try to trigger download/install by calling the update's install method
                                         $updateName = $updateObj.Name
-                                        Write-Host "  Attempting to install: $updateName" -ForegroundColor Gray
+                                        Write-Host "  Processing: $updateName" -ForegroundColor Gray
                                         
-                                        # Method 1: Try using the CCM_SoftwareUpdate.Install() method if it exists
-                                        if (Get-Member -InputObject $updateObj -Name "Install" -MemberType Method) {
-                                            $result = $updateObj.Install()
-                                            if ($result.ReturnValue -eq 0) {
+                                        # Method 1: Use CCM_SoftwareUpdate.Install() method directly
+                                        try {
+                                            Write-Host "    Attempting direct install method..." -ForegroundColor Yellow
+                                            $directResult = Invoke-WmiMethod -InputObject $updateObj -Name "Install"
+                                            
+                                            if ($directResult.ReturnValue -eq 0) {
                                                 $successCount++
-                                                Write-Host "  ✓ Successfully triggered install for: $updateName" -ForegroundColor Green
+                                                $actionResults += "✓ Direct install initiated for: $updateName"
+                                                Write-Host "    ✓ Direct install successful" -ForegroundColor Green
+                                                continue
                                             } else {
-                                                Write-Host "  ✗ Install failed for: $updateName (Code: $($result.ReturnValue))" -ForegroundColor Red
+                                                Write-Host "    Direct install failed (Code: $($directResult.ReturnValue))" -ForegroundColor Yellow
                                             }
-                                        } else {
-                                            # Method 2: Try triggering a software updates scan and let SCCM handle it
-                                            try {
-                                                $scanResult = Invoke-WmiMethod -Namespace "root\ccm" -Class "SMS_CLIENT" -Name "TriggerSchedule" -ArgumentList "{00000000-0000-0000-0000-000000000113}"
-                                                Write-Host "  Triggered software updates evaluation cycle" -ForegroundColor Yellow
+                                        } catch {
+                                            Write-Host "    Direct install method not available" -ForegroundColor Yellow
+                                        }
+                                        
+                                        # Method 2: Use the ClientSDK to download first, then install
+                                        try {
+                                            Write-Host "    Attempting download then install..." -ForegroundColor Yellow
+                                            
+                                            # Step 1: Download the update
+                                            $downloadResult = Invoke-WmiMethod -Namespace "root\ccm\clientsdk" -Class "CCM_SoftwareUpdatesManager" -Name "SetDownloadAsync" -ArgumentList @(@($updateObj))
+                                            
+                                            if ($downloadResult.ReturnValue -eq 0) {
+                                                Write-Host "    Download initiated, waiting..." -ForegroundColor Cyan
+                                                Start-Sleep -Seconds 10  # Wait for download to start
+                                                
+                                                # Step 2: Install the update
+                                                $installSingleResult = Invoke-WmiMethod -Namespace "root\ccm\clientsdk" -Class "CCM_SoftwareUpdatesManager" -Name "InstallUpdates" -ArgumentList @(@($updateObj))
+                                                
+                                                if ($installSingleResult.ReturnValue -eq 0) {
+                                                    $successCount++
+                                                    $actionResults += "✓ Download+Install initiated for: $updateName"
+                                                    Write-Host "    ✓ Download+Install successful" -ForegroundColor Green
+                                                    continue
+                                                } else {
+                                                    Write-Host "    Install after download failed (Code: $($installSingleResult.ReturnValue))" -ForegroundColor Yellow
+                                                }
+                                            } else {
+                                                Write-Host "    Download initiation failed (Code: $($downloadResult.ReturnValue))" -ForegroundColor Yellow
+                                            }
+                                        } catch {
+                                            Write-Host "    Download+Install method failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                                        }
+                                        
+                                        # Method 3: Use WMI to set the update's download and install flags
+                                        try {
+                                            Write-Host "    Attempting to modify update properties..." -ForegroundColor Yellow
+                                            
+                                            # Try to set the update to download and install
+                                            $updateObj.Get()  # Refresh the object
+                                            
+                                            # Some SCCM versions have these properties
+                                            if (Get-Member -InputObject $updateObj -Name "IsSelected" -MemberType Property) {
+                                                $updateObj.IsSelected = $true
+                                                $updateObj.Put()
+                                                Write-Host "    Set update as selected" -ForegroundColor Cyan
+                                            }
+                                            
+                                            # Try to trigger the download/install action
+                                            $modifyResult = $updateObj.Install()
+                                            if ($modifyResult.ReturnValue -eq 0) {
                                                 $successCount++
-                                            } catch {
-                                                Write-Host "  Could not trigger evaluation for: $updateName" -ForegroundColor Red
+                                                $actionResults += "✓ Property modification successful for: $updateName"
+                                                Write-Host "    ✓ Property modification successful" -ForegroundColor Green
+                                            } else {
+                                                Write-Host "    Property modification failed (Code: $($modifyResult.ReturnValue))" -ForegroundColor Red
                                             }
+                                            
+                                        } catch {
+                                            Write-Host "    Property modification failed: $($_.Exception.Message)" -ForegroundColor Red
+                                        }
+                                        
+                                        # Method 4: Manual trigger using specific SCCM actions
+                                        try {
+                                            Write-Host "    Attempting manual SCCM client actions..." -ForegroundColor Yellow
+                                            
+                                            # Trigger Software Updates Download Cycle
+                                            $downloadCycleResult = Invoke-WmiMethod -Namespace "root\ccm" -Class "SMS_CLIENT" -Name "TriggerSchedule" -ArgumentList "{00000000-0000-0000-0000-000000000108}"
+                                            
+                                            Start-Sleep -Seconds 5
+                                            
+                                            # Trigger Software Updates Install Cycle  
+                                            $installCycleResult = Invoke-WmiMethod -Namespace "root\ccm" -Class "SMS_CLIENT" -Name "TriggerSchedule" -ArgumentList "{00000000-0000-0000-0000-000000000109}"
+                                            
+                                            $successCount++
+                                            $actionResults += "✓ Triggered download and install cycles for: $updateName"
+                                            Write-Host "    ✓ Triggered SCCM client actions" -ForegroundColor Green
+                                            
+                                        } catch {
+                                            Write-Host "    SCCM client actions failed: $($_.Exception.Message)" -ForegroundColor Red
+                                            $actionResults += "✗ All methods failed for: $updateName"
                                         }
                                     }
                                 } catch {
-                                    Write-Host "  Error processing update: $updateID - $($_.Exception.Message)" -ForegroundColor Red
+                                    Write-Host "  ✗ Error processing update: $updateID - $($_.Exception.Message)" -ForegroundColor Red
+                                    $actionResults += "✗ Error processing: $updateID"
                                 }
                             }
                             
-                            # If we triggered evaluations, give a different return code
+                            # Set overall result based on success count
                             $installResult = @{
                                 ReturnValue = if ($successCount -gt 0) { 0 } else { 1 }
                                 SuccessfulUpdates = $successCount
                                 TotalUpdates = $updateIDs.Count
-                                Method = "EvaluationTrigger"
+                                Method = "ManualClientActions"
+                                ActionResults = $actionResults
                             }
+                            
+                        } catch {
+                            $installResult = @{
+                                Status = "Error"
+                                Message = "Manual client actions error: $($_.Exception.Message)"
+                                ReturnCode = -1
+                                UpdatesQueued = 0
+                                Method = "Failed"
+                            }
+                            Write-Host "✗ Manual client actions failed: $($_.Exception.Message)" -ForegroundColor Red
                         }
                         
                         # Interpret the result
@@ -424,18 +608,30 @@ try {
             if ($installResult.InstallationResults.Status) {
                 $status = $installResult.InstallationResults.Status
                 $message = $installResult.InstallationResults.Message
-                $returnCode = $installResult.InstallationResults.ReturnCode
+                $returnCode = if ($installResult.InstallationResults.ReturnCode) { $installResult.InstallationResults.ReturnCode } else { $installResult.InstallationResults.ReturnValue }
                 $queued = $installResult.InstallationResults.UpdatesQueued
+                $method = if ($installResult.InstallationResults.Method) { $installResult.InstallationResults.Method } else { "Standard" }
                 
                 switch ($status) {
                     "Success" {
                         Write-Host "✓ Installation Status: SUCCESS" -ForegroundColor Green
-                        Write-Host "✓ Updates Queued: $queued" -ForegroundColor Green
+                        Write-Host "✓ Updates Processed: $queued" -ForegroundColor Green
+                        Write-Host "✓ Method Used: $method" -ForegroundColor Green
                         Write-Host "✓ Message: $message" -ForegroundColor Green
+                        
+                        if ($installResult.InstallationResults.ActionResults) {
+                            Write-Host "`nDetailed Results:" -ForegroundColor Cyan
+                            $installResult.InstallationResults.ActionResults | ForEach-Object {
+                                $color = if ($_ -like "*✓*") { "Green" } else { "Red" }
+                                Write-Host "  $_" -ForegroundColor $color
+                            }
+                        }
+                        
                         Write-Host "`nNext Steps:" -ForegroundColor Cyan
-                        Write-Host "- Monitor SCCM console for installation progress" -ForegroundColor White
-                        Write-Host "- Check server for pending reboots" -ForegroundColor White
-                        Write-Host "- Run this script again later to verify completion" -ForegroundColor White
+                        Write-Host "- Updates should start downloading/installing within 1-2 minutes" -ForegroundColor White
+                        Write-Host "- Check SCCM Control Panel for progress" -ForegroundColor White
+                        Write-Host "- Monitor C:\\Windows\\CCM\\Logs\\UpdatesDeployment.log" -ForegroundColor White
+                        Write-Host "- Run with -VerifyInstallation to check progress" -ForegroundColor White
                     }
                     "Failed" {
                         Write-Host "✗ Installation Status: FAILED" -ForegroundColor Red
