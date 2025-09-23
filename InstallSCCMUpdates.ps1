@@ -119,17 +119,28 @@ function Install-SCCMUpdatesRemotely {
                         # Get the CCM_SoftwareUpdatesManager class
                         $updateManager = [wmiclass]"root\ccm\clientsdk:CCM_SoftwareUpdatesManager"
                         
-                        # Prepare update list for installation (using UpdateID)
-                        # SCCM expects an array of CCM_SoftwareUpdate objects, not hashtables
-                        $updateList = @()
+                        # Prepare update list for installation - need to get fresh WMI objects for installation
+                        # Cannot use the filtered objects directly due to PSObject wrapping in remote sessions
+                        Write-Host "Preparing updates for installation..." -ForegroundColor Cyan
+                        
+                        $updateIDs = @()
                         foreach ($update in $pendingUpdates) {
                             Write-Host "  Queuing: $($update.Name)" -ForegroundColor Gray
-                            $updateList += $update
+                            $updateIDs += $update.UpdateID
                         }
                         
-                        # Call the InstallUpdates method with the actual update objects
-                        Write-Host "Calling SCCM InstallUpdates method..." -ForegroundColor Cyan
-                        $installResult = $updateManager.InstallUpdates($updateList)
+                        # Get fresh WMI objects for installation using the UpdateIDs
+                        $installableUpdates = @()
+                        foreach ($updateID in $updateIDs) {
+                            $wmiUpdate = Get-WmiObject -Namespace "root\ccm\clientsdk" -Class "ccm_softwareupdate" -Filter "UpdateID='$updateID'"
+                            if ($wmiUpdate) {
+                                $installableUpdates += $wmiUpdate
+                            }
+                        }
+                        
+                        # Call the InstallUpdates method with fresh WMI objects
+                        Write-Host "Calling SCCM InstallUpdates method with $($installableUpdates.Count) updates..." -ForegroundColor Cyan
+                        $installResult = $updateManager.InstallUpdates($installableUpdates)
                         
                         # Interpret the result
                         switch ($installResult.ReturnValue) {
